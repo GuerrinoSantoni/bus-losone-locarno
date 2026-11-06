@@ -65,62 +65,52 @@ function boardTime(x){const raw=x.stop?.prognosis?.departure||x.stop?.departure;
 function nearLine(x){const str=[x.number,x.name].filter(Boolean).join(' ');const m=str.match(/(?:^|\D)(1|7)(?:\D|$)/);return m?m[1]:null}
 function showNearStation(st,entries){const card=document.createElement('div');card.className='near-card';const title=document.createElement('div');title.className='near-title';const name=document.createElement('span');name.textContent=st.name;const distance=document.createElement('span');distance.className='near-dist';distance.textContent=st.label;title.append(name,distance);card.append(title);const trips=document.createElement('div');trips.className='near-trips';if(!entries.length){trips.textContent='Nessuna partenza disponibile per le linee selezionate.'}else for(const e of entries){const line=document.createElement('div');line.className='near-trip';const t=document.createElement('b');t.textContent=new Intl.DateTimeFormat('it-CH',{timeZone:'Europe/Zurich',hour:'2-digit',minute:'2-digit'}).format(e.when);const detail=document.createElement('span');detail.textContent=`Linea ${e.line} → ${e.to||'destinazione non indicata'}`+(e.delay?' · '+(e.delay>0?'+':'')+e.delay+' min':'');line.append(t,detail);trips.append(line)}card.append(trips);$('nearResults').append(card)}
 function stopName(x){return x?.station?.name||x?.name||''}
+// Sequenza linea 7 ricavata dalla tabella FART fornita dall'utente.
+// Tratto visualizzato: Caserma - Piazza Castello (non Piazza Stazione).
+const route7=['Losone, Caserma','Losone, Arbigo','Losone, Canaa','Losone, Posta','Losone, Ponte Maggia','Solduno, Stazione','Locarno, S. Antonio centrale','Locarno, Piazza Castello'];
+function directionMatches(boardDestination,back){
+ const d=String(boardDestination||'').toLocaleLowerCase('it');
+ // Evita di mostrare corse in senso contrario. Se la destinazione non
+ // consente una verifica, la corsa non viene mostrata.
+ return back ? /losone/.test(d) : /locarno/.test(d);
+}
 async function loadNearby(){
  const id=++nearRequest;if(nearController)nearController.abort();nearController=new AbortController();const signal=nearController.signal;
  $('nearResults').replaceChildren();$('nearRefresh').hidden=true;
- const base=stops[reverse?1:0];$('nearBase').textContent=base;nearStatus('Ricerca delle fermate effettive lungo il percorso…');
+ const base=stops[reverse?1:0];$('nearBase').textContent=base;
+ if(filter==='1'){
+  nearStatus('La linea 1 non è verificata su questo tratto. Le fermate adiacenti mostrate sono solo quelle della linea 7.');
+  $('nearRefresh').hidden=false;return;
+ }
+ const ordered=reverse?[...route7].reverse():route7;
+ const i=ordered.indexOf(base);
+ if(i<0){nearStatus('Fermata non presente nella sequenza verificata.');$('nearRefresh').hidden=false;return}
+ const stations=[];
+ if(i>0)stations.push({name:ordered[i-1],label:'Linea 7 · Fermata precedente',line:'7'});
+ if(i<ordered.length-1)stations.push({name:ordered[i+1],label:'Linea 7 · Fermata successiva',line:'7'});
+ nearStatus('Verifica delle partenze delle fermate adiacenti…');
  try{
   const date=$('date').value,time=$('time').value;
-  const adjacent=new Map();
-  // La sequenza della corsa viene tagliata ai due estremi scelti.
-  // Fermate oltre Piazza Castello o oltre Caserma non devono comparire.
-  const norm=n=>String(n||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLocaleLowerCase('it').replace(/\s+/g,' ').trim();
-  for(const [from,to] of [[stops[0],stops[1]],[stops[1],stops[0]]]){
-   const u=new URL(API);u.searchParams.set('from',from);u.searchParams.set('to',to);u.searchParams.set('date',date);u.searchParams.set('time',time);u.searchParams.set('limit','16');u.searchParams.append('transportations[]','bus');
-   const data=await apiJSON(u,signal);
-   for(const c of data.connections||[]){
-    const sections=(c.sections||[]).filter(x=>x.journey);
-    if(sections.length!==1)continue;
-    const j=sections[0].journey;
-    const line=nearLine(j);if(!line||(filter!=='all'&&filter!==line))continue;
-    const pass=j.passList||[];
-    const fromIdx=pass.findIndex(p=>norm(stopName(p))===norm(from));
-    const toIdx=pass.findIndex(p=>norm(stopName(p))===norm(to));
-    if(fromIdx<0||toIdx<=fromIdx)continue;
-    const baseIdx=pass.findIndex((p,i)=>i>=fromIdx&&i<=toIdx&&norm(stopName(p))===norm(base));
-    if(baseIdx<0)continue;
-    const offsets=baseIdx===toIdx?[[-1,'Fermata precedente']]:baseIdx===fromIdx?[[1,'Fermata successiva']]:[[-1,'Fermata precedente'],[1,'Fermata successiva']];
-    for(const [offset,label] of offsets){
-     const pos=baseIdx+offset;
-     if(pos<fromIdx||pos>toIdx)continue;
-     const entry=pass[pos],name=stopName(entry);
-     if(!name||norm(name)===norm(base))continue;
-     const key=line+'|'+label+'|'+norm(name);
-     adjacent.set(key,{name,label:'Linea '+line+' · '+label,line,id:entry.station?.id||null});
-    }
-   }
-  }
-  if(id!==nearRequest)return;
-  const stations=[...adjacent.values()].sort((a,b)=>a.line.localeCompare(b.line)||a.label.localeCompare(b.label)||a.name.localeCompare(b.name));
-  if(!stations.length){nearStatus('La fonte dati non ha restituito la sequenza delle fermate delle corse disponibili. Non posso verificare le fermate precedenti e successive.');$('nearRefresh').hidden=false;return}
   const isNow=date===fmt(new Date())&&time<=clock(new Date());
   const when=isNow?swissDateTime(new Date()):`${date} ${time}`;
-  let ok=0;
   const results=await Promise.all(stations.map(async st=>{
    try{
-    const u=new URL(BOARD_API);if(st.id)u.searchParams.set('id',st.id);else u.searchParams.set('station',st.name);
+    const u=new URL(BOARD_API);u.searchParams.set('station',st.name);
     u.searchParams.set('limit','100');u.searchParams.set('datetime',when);u.searchParams.append('transportations[]','bus');
     const board=await apiJSON(u,signal);
-    const entries=(board.stationboard||[]).map(x=>({line:nearLine(x),to:x.to,when:boardTime(x),delay:x.stop?.delay??null})).filter(x=>x.line===st.line&&x.when&&!Number.isNaN(+x.when)&&(!isNow||x.when>=new Date(Date.now()-60000))).sort((a,b)=>a.when-b.when).slice(0,3);
-    ok++;return {st,entries};
-   }catch(e){if(e.name==='AbortError')throw e;return {st,entries:null}}
+    const entries=(board.stationboard||[]).map(x=>({line:nearLine(x),to:x.to,when:boardTime(x),delay:x.stop?.delay??null}))
+     .filter(x=>x.line==='7'&&directionMatches(x.to,reverse)&&x.when&&!Number.isNaN(+x.when)&&(!isNow||x.when>=new Date(Date.now()-60000)))
+     .sort((a,b)=>a.when-b.when).slice(0,3);
+    return {st,entries,ok:true};
+   }catch(e){if(e.name==='AbortError')throw e;return {st,entries:[],ok:false}}
   }));
   if(id!==nearRequest)return;
-  for(const {st,entries} of results){showNearStation(st,entries||[]);if(entries===null)$('nearResults').lastElementChild.querySelector('.near-trips').textContent='Partenze non disponibili: richiesta non riuscita.'}
-  nearStatus(`${stations.length} fermate adiacenti ricavate dalle corse disponibili · ${ok} con risposta orari · aggiornato ${swissClock()}.`);
+  for(const {st,entries,ok} of results){showNearStation(st,entries);if(!ok)$('nearResults').lastElementChild.querySelector('.near-trips').textContent='Partenze non disponibili: richiesta non riuscita.'}
+  nearStatus(`${stations.length} fermate adiacenti sulla linea 7 · ${results.filter(r=>r.ok).length} con risposta orari · aggiornato ${swissClock()}. Solo corse nella direzione selezionata.`);
   $('nearRefresh').hidden=false;
- }catch(e){if(id!==nearRequest||e.name==='AbortError')return;nearStatus('Impossibile verificare le fermate del percorso: '+e.message+'. Riprova.');$('nearRefresh').hidden=false}
+ }catch(e){if(id!==nearRequest||e.name==='AbortError')return;nearStatus('Impossibile caricare le partenze delle fermate: '+e.message);$('nearRefresh').hidden=false}
 }
+
 $('nearToggle').onclick=()=>{nearOpen=!nearOpen;$('nearPanel').hidden=!nearOpen;$('nearToggle').textContent=nearOpen?'Nascondi':'Mostra';$('nearToggle').setAttribute('aria-expanded',String(nearOpen));if(nearOpen)loadNearby();else {++nearRequest;if(nearController)nearController.abort()}};
 $('nearRefresh').onclick=loadNearby;
 $('swap').onclick=()=>{reverse=!reverse;updateRoute();load();if(nearOpen)loadNearby()};document.querySelectorAll('[data-line]').forEach(b=>b.onclick=()=>{filter=b.dataset.line;document.querySelectorAll('[data-line]').forEach(x=>x.classList.toggle('active',x===b));render();if(nearOpen)loadNearby()});$('refresh').onclick=()=>{load();if(nearOpen)loadNearby()};$('more').onclick=()=>{page++;load(true)};$('date').onchange=()=>{load();if(nearOpen)loadNearby()};$('time').onchange=()=>{load();if(nearOpen)loadNearby()};initDate();updateRoute();updateNow();setInterval(updateNow,15000);load();
